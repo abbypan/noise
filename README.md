@@ -9,4 +9,6 @@ remove cipher state: nonce n
 
 remove symmetric state: prevCK, prevH
 
-add hkdf for aes encryption, derive key, iv
+add hkdf for aead, derive key, iv
+
+add time() for aead aad

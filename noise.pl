@@ -21,6 +21,7 @@ our $KEY_LEN     = 32;
 our $IV_LEN      = 12;
 our $AUTHTAG_LEN = 16;
 our $DH_LEN      = 32;
+our $TIME_LEN = 10;
 
 our %HANDSHAKE_PATTEN = (
   'NN' => {
@@ -132,12 +133,14 @@ sub noise_derive_key_iv {
 sub aead_encrypt {
   my ( $key, $iv, $aad, $plaintext ) = @_;
 
-  my ( $ciphertext, $authtag ) = gcm_encrypt_authenticate( 'AES', $key, $iv, $aad, $plaintext );
-  my $cipherinfo = $authtag . $ciphertext;
+  my $time = time();  # $TIME_LEN
+  my ( $ciphertext, $authtag ) = gcm_encrypt_authenticate( 'AES', $key, $iv, $time.$aad, $plaintext );
+  my $cipherinfo = $time.$authtag.$ciphertext;
 
   print "\nnoise encrypt:\n";
   print "key:\n",        unpack( "H*", $key ),        "\n";
   print "iv:\n",         unpack( "H*", $iv ),         "\n";
+  print "time:\n",        unpack( "H*", $time ),        "\n";
   print "aad:\n",        unpack( "H*", $aad ),        "\n";
   print "plaintext:\n",  unpack( "H*", $plaintext ),  "\n\n";
   print "ciphertext:\n", unpack( "H*", $ciphertext ), "\n";
@@ -150,17 +153,19 @@ sub aead_encrypt {
 sub aead_decrypt {
   my ( $key, $iv, $aad, $cipherinfo ) = @_;
 
-  my $authtag    = substr $cipherinfo, 0, $AUTHTAG_LEN;
-  my $ciphertext = substr $cipherinfo, $AUTHTAG_LEN, length( $cipherinfo ) - $AUTHTAG_LEN;
-  my $plaintext  = gcm_decrypt_verify( 'AES', $key, $iv, $aad, $ciphertext, $authtag );
+  my $time    = substr $cipherinfo, 0, $TIME_LEN;
+  my $authtag    = substr $cipherinfo, $TIME_LEN, $AUTHTAG_LEN;
+  my $ciphertext = substr $cipherinfo, $TIME_LEN+$AUTHTAG_LEN, length( $cipherinfo ) - $AUTHTAG_LEN;
+  my $plaintext  = gcm_decrypt_verify( 'AES', $key, $iv, $time.$aad, $ciphertext, $authtag );
 
   print "\nnoise decrypt:\n";
   print "key:\n",        unpack( "H*", $key ),        "\n";
   print "iv:\n",         unpack( "H*", $iv ),         "\n";
   print "aad:\n",        unpack( "H*", $aad ),        "\n";
-  print "ciphertext:\n", unpack( "H*", $ciphertext ), "\n";
+  print "cipherinfo:\n", unpack( "H*", $cipherinfo ), "\n";
+  print "time:\n",        unpack( "H*", $time ),        "\n";
   print "authtag:\n",    unpack( "H*", $authtag ),    "\n";
-  print "cipherinfo:\n", unpack( "H*", $cipherinfo ), "\n\n";
+  print "ciphertext:\n", unpack( "H*", $ciphertext ), "\n\n";
   print "plaintext:\n",  unpack( "H*", $plaintext ),  "\n";
 
   return $plaintext;
@@ -415,7 +420,7 @@ sub read_message {
     if ( $m eq 'e' or $m eq 's' ) {
       $expected = $pub_raw_len;
       if ( $m eq 's' and $hs->{ss}{hasK} ) {
-        $expected += $AUTHTAG_LEN;
+        $expected += $TIME_LEN+$AUTHTAG_LEN;
       }
 
       if ( $m eq 'e' ) {
