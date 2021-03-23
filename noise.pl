@@ -12,6 +12,8 @@ use File::Slurp qw/slurp write_file/;
 use Storable qw(dclone);
 use Crypt::OpenSSL::Base::Func qw/ecdh/;
 use POSIX qw/strftime/;
+use CBOR::XS;
+use Smart::Comments;
 
 our $CURVE       = 'secp256r1';
 our $CIPHER_FUNC = 'AESGCM';
@@ -20,10 +22,27 @@ our $HASH_LEN    = 32;
 our $KEY_LEN     = 32;
 our $IV_LEN      = 12;
 our $AUTHTAG_LEN = 16;
-our $DH_LEN      = 32;
-our $TIME_LEN = 10;
 
 our %HANDSHAKE_PATTEN = (
+  'N' => {
+    responder_pre_messages => [qw/s/],
+    messages               => [
+      [qw/e es/],
+    ],
+  },
+  'K' => {
+    initiator_pre_messages => [qw/s/],
+    responder_pre_messages => [qw/s/],
+    messages               => [
+      [qw/e es ss/],
+    ],
+  },
+  'X' => {
+    responder_pre_messages => [qw/s/],
+    messages               => [
+      [qw/e es s ss/],
+    ],
+  },
   'NN' => {
     messages => [
       [qw/e/],
@@ -53,6 +72,20 @@ our %HANDSHAKE_PATTEN = (
       [qw/e ee se/],
     ],
   },
+  'IX' => {
+    messages => [
+      [qw/e s/],
+      [qw/e ee se s es/],
+    ],
+  },
+
+  'XX' => {
+    messages => [
+      [qw/e/],
+      [qw/e ee s es/],
+      [qw/s se/],
+    ],
+  },
 );
 
 sub noise_hkdf {
@@ -75,12 +108,10 @@ sub init_symmetric_state {
   my ( $handshake_name ) = @_;
   my %ss;
 
-  #print length($handshake_name),"\n";
   if ( length( $handshake_name ) <= $HASH_LEN ) {
     my $x = ( '00' ) x ( $HASH_LEN - length( $handshake_name ) );
     $ss{h} = $handshake_name . pack( "H*", $x );
 
-    #print unpack("H*", $ss{h}), "\n";
   } else {
     $ss{h} = sha256( $handshake_name );
   }
@@ -133,40 +164,41 @@ sub noise_derive_key_iv {
 sub aead_encrypt {
   my ( $key, $iv, $aad, $plaintext ) = @_;
 
-  my $time = time();  # $TIME_LEN
-  my ( $ciphertext, $authtag ) = gcm_encrypt_authenticate( 'AES', $key, $iv, $time.$aad, $plaintext );
-  my $cipherinfo = $time.$authtag.$ciphertext;
+  my $time = time();
+  my ( $ciphertext, $authtag ) = gcm_encrypt_authenticate( 'AES', $key, $iv, $time . $aad, $plaintext );
 
-  print "\nnoise encrypt:\n";
-  print "key:\n",        unpack( "H*", $key ),        "\n";
-  print "iv:\n",         unpack( "H*", $iv ),         "\n";
-  print "time:\n",        unpack( "H*", $time ),        "\n";
-  print "aad:\n",        unpack( "H*", $aad ),        "\n";
-  print "plaintext:\n",  unpack( "H*", $plaintext ),  "\n\n";
-  print "ciphertext:\n", unpack( "H*", $ciphertext ), "\n";
-  print "authtag:\n",    unpack( "H*", $authtag ),    "\n";
-  print "cipherinfo:\n", unpack( "H*", $cipherinfo ), "\n";
+  my $cipherinfo = encode_cbor [ $time, $authtag, $ciphertext ];
+
+  ### noise encrypt
+  ### key: unpack("H*", $key)
+  ### iv: unpack("H*", $iv)
+  ### time: unpack("H*", $time)
+  ### aad: unpack("H*", $aad)
+  ### plaintext: unpack("H*", $plaintext)
+  ### ciphertext: unpack("H*", $ciphertext)
+  ### authtag: unpack("H*", $authtag)
+  ### cipherinfo: unpack("H*", $cipherinfo)
 
   return $cipherinfo;
-}
+} ## end sub aead_encrypt
 
 sub aead_decrypt {
   my ( $key, $iv, $aad, $cipherinfo ) = @_;
 
-  my $time    = substr $cipherinfo, 0, $TIME_LEN;
-  my $authtag    = substr $cipherinfo, $TIME_LEN, $AUTHTAG_LEN;
-  my $ciphertext = substr $cipherinfo, $TIME_LEN+$AUTHTAG_LEN, length( $cipherinfo ) - $AUTHTAG_LEN;
-  my $plaintext  = gcm_decrypt_verify( 'AES', $key, $iv, $time.$aad, $ciphertext, $authtag );
+  my $d = decode_cbor $cipherinfo;
+  my ( $time, $authtag, $ciphertext ) = @$d;
 
-  print "\nnoise decrypt:\n";
-  print "key:\n",        unpack( "H*", $key ),        "\n";
-  print "iv:\n",         unpack( "H*", $iv ),         "\n";
-  print "aad:\n",        unpack( "H*", $aad ),        "\n";
-  print "cipherinfo:\n", unpack( "H*", $cipherinfo ), "\n";
-  print "time:\n",        unpack( "H*", $time ),        "\n";
-  print "authtag:\n",    unpack( "H*", $authtag ),    "\n";
-  print "ciphertext:\n", unpack( "H*", $ciphertext ), "\n\n";
-  print "plaintext:\n",  unpack( "H*", $plaintext ),  "\n";
+  my $plaintext = gcm_decrypt_verify( 'AES', $key, $iv, $time . $aad, $ciphertext, $authtag );
+
+  ### noise decrypt
+  ### key: unpack("H*", $key)
+  ### iv: unpack("H*", $iv)
+  ### aad: unpack("H*", $aad)
+  ### cipherinfo: unpack("H*", $cipherinfo)
+  ### time: unpack("H*", $time)
+  ### authtag: unpack("H*", $authtag)
+  ### ciphertext: unpack("H*", $ciphertext)
+  ### plaintext: unpack("H*", $plaintext)
 
   return $plaintext;
 } ## end sub aead_decrypt
@@ -176,13 +208,17 @@ sub encrypt_and_hash {
 
   if ( !$ss->{hasK} ) {
     mix_hash( $ss, $plaintext );
-    return $out . $plaintext;
+
+    push @$out, $plaintext;
+    return $out;
   }
 
   my ( $key, $iv ) = noise_derive_key_iv( $ss->{k}, '' );
   my $cipherinfo = aead_encrypt( $key, $iv, $ss->{h}, $plaintext );
   mix_hash( $ss, $cipherinfo );
-  return $out . $cipherinfo;
+
+  push @$out, $cipherinfo;
+  return $out;
 }
 
 sub decrypt_and_hash {
@@ -190,13 +226,16 @@ sub decrypt_and_hash {
 
   if ( !$ss->{hasK} ) {
     mix_hash( $ss, $cipherinfo );
-    return $out . $cipherinfo;
+    push @$out, $cipherinfo;
+    return $out;
   }
 
   my ( $key, $iv ) = noise_derive_key_iv( $ss->{k}, '' );
   my $plaintext = aead_decrypt( $key, $iv, $ss->{h}, $cipherinfo );
   mix_hash( $ss, $cipherinfo );
-  return $out . $plaintext;
+
+  push @$out, $plaintext;
+  return $out;
 }
 
 sub noise_split {
@@ -232,7 +271,7 @@ sub generate_key_pair {
 
   #$pk->import_key($pub_f);
   my $public_raw_compressed = $pk->export_key_raw( 'public_compressed' );
-  dump( "public compressed", $public_raw_compressed );
+  ### public compressed: unpack("H*", $public_raw_compressed)
 
   return ( $priv_f, $pub_f, $public_raw_compressed );
 } ## end sub generate_key_pair
@@ -258,12 +297,14 @@ sub noise_ecdh {
   my ( $local_priv_f, $peer_pub_f ) = @_;
   my $z = ecdh( $local_priv_f, $peer_pub_f );
 
-  print "ecdh: $local_priv_f, $peer_pub_f, $z\n";
-  print "local_priv:\n", slurp( $local_priv_f ), "\n";
-  print "peer_pub:\n",   slurp( $peer_pub_f ),   "\n";
-  print "z:\n",          $z, "\n";
   $z =~ s/://g;
   $z = pack( "H*", $z );
+
+  ### ecdh
+  ### local_priv: slurp( $local_priv_f )
+  ### peer_pub: slurp( $peer_pub_f )
+  ### z: unpack("H*", $z)
+
   return $z;
 }
 
@@ -282,6 +323,8 @@ sub new_handshake_state {
   #e_pub: local_ephemeral_pub
   #rs_pub: peer_static_pub
   #re_pub: peer_ephemeral_pub
+  #s_pub_info_type: raw = compressed point, id = digest of raw, cert, sn = cert serial number
+  #s_pub_info_value: s_pub
 
   my $hs = dclone( $conf );
   $hs->{message_pattens} = dclone( $HANDSHAKE_PATTEN{ $hs->{handshake_pattern_name} }{messages} );
@@ -300,7 +343,8 @@ sub new_handshake_state {
     }
   }
 
-  $hs->{ss} = init_symmetric_state( "Noise_" . $hs->{handshake_pattern_name} . $psk_modifier . "_" . $hs->{ciphersuite_name} );
+  my $protocol_name = join( "_", "Noise", $hs->{handshake_pattern_name} . $psk_modifier, $hs->{ciphersuite_name} );
+  $hs->{ss} = init_symmetric_state( $protocol_name );
 
   mix_hash( $hs->{ss}, $hs->{prologue} );
 
@@ -344,21 +388,22 @@ sub write_message {
   }
 
   for my $m ( @{ $hs->{message_pattens}[ $hs->{msg_id} ] } ) {
-    print "write message pattern: $m\n";
+    ### write message pattern: $m
     if ( $m eq 'e' ) {
 
       ( $hs->{e_priv}, $hs->{e_pub}, $hs->{e}{pub} ) = generate_key_pair( $CURVE, $hs->{who} . "_e_priv.pem", $hs->{who} . "_e_pub.pem" );
 
       #( $hs->{e_priv}, $hs->{e_pub}, $hs->{e}{pub} ) =
-        #( $hs->{who} . "_e_priv.pem", $hs->{who} . "_e_pub.pem", read_public_key_pem_to_raw( $hs->{who} . "_e_pub.pem" ) );
+      #( $hs->{who} . "_e_priv.pem", $hs->{who} . "_e_pub.pem", read_public_key_pem_to_raw( $hs->{who} . "_e_pub.pem" ) );
 
-      $out .= $hs->{e}{pub};
+      push @$out, $hs->{e}{pub};
       mix_hash( $hs->{ss}, $hs->{e}{pub} );
       if ( $hs->{psk} ) {
         mix_key( $hs->{ss}, $hs->{e}{pub} );
       }
     } elsif ( $m eq 's' ) {
-      $out = encrypt_and_hash( $out, $hs->{ss}, read_public_key_pem_to_raw( $hs->{s_pub} ) );
+      my $s_pub_info_cbor = encode_cbor [ $hs->{s_pub_info_type}, $hs->{s_pub_info_value} ];
+      $out = encrypt_and_hash( $out, $hs->{ss}, $s_pub_info_cbor );
     } elsif ( $m eq 'ee' ) {
       mix_key( $hs->{ss}, noise_ecdh( $hs->{e_priv}, $hs->{re_pub} ) );
     } elsif ( $m eq 'es' ) {
@@ -384,19 +429,19 @@ sub write_message {
   $hs->{should_write} = 0;
   $hs->{msg_id}++;
 
-  dump( 'encrypt_and_hash', $hs->{ss} );
   $out = encrypt_and_hash( $out, $hs->{ss}, $payload );
 
+  my $out_cbor = encode_cbor $out;
   if ( $hs->{msg_id} >= $m_pattern_len ) {
     my ( $cs1, $cs2 ) = noise_split( $hs->{ss} );
-    return ( $out, $cs1, $cs2 );
+    return ( $out_cbor, $cs1, $cs2 );
   }
 
-  return ( $out );
+  return ( $out_cbor );
 } ## end sub write_message
 
 sub read_message {
-  my ( $out, $hs, $message ) = @_;
+  my ( $out, $hs, $message_cbor ) = @_;
 
   if ( $hs->{should_write} ) {
     return;
@@ -407,35 +452,35 @@ sub read_message {
     return;
   }
 
-  my $pub_raw_len = $DH_LEN + 1;       #ec compressed point
-  if ( $CURVE eq '25519' ) {
-    $pub_raw_len = $DH_LEN;
-  }
+  my $message = decode_cbor $message_cbor;
 
   my $i = 0;
-  my $expected;
 
   for my $m ( @{ $hs->{message_pattens}[ $hs->{msg_id} ] } ) {
-    print "read message pattern: $m\n";
+    ### read message pattern: $m
     if ( $m eq 'e' or $m eq 's' ) {
-      $expected = $pub_raw_len;
-      if ( $m eq 's' and $hs->{ss}{hasK} ) {
-        $expected += $TIME_LEN+$AUTHTAG_LEN;
-      }
 
       if ( $m eq 'e' ) {
-        $hs->{re}{pub} = substr $message, $i, $expected;
-        $hs->{re_pub}  = write_public_key_raw_to_pem( $CURVE, $hs->{re}{pub}, $hs->{who} . "_re_pub.pem" );
+
+        $hs->{re}{pub} = $message->[$i];
+        $hs->{re_pub} = write_public_key_raw_to_pem( $CURVE, $hs->{re}{pub}, $hs->{who} . "_re_pub.pem" );
         mix_hash( $hs->{ss}, $hs->{re}{pub} );
         if ( $hs->{psk} ) {
           mix_key( $hs->{ss}, $hs->{re}{pub} );
         }
       } elsif ( $m eq 's' ) {
-        my $temp_m = substr $message, $i, $expected;
-        $hs->{rs}{pub} = decrypt_and_hash( '', $hs->{ss}, $temp_m );
+        my $temp_m = $message->[$i];
+
+        my $rs_r          = decrypt_and_hash( [], $hs->{ss}, $temp_m );
+        my $rs_pub_info_r = decode_cbor $rs_r->[0];
+        my ( $rs_pub_info_type, $rs_pub_info_value ) = @$rs_pub_info_r;
+
+        $hs->{rs}{pub} = check_pub_avail( $rs_pub_info_type, $rs_pub_info_value );
+
         $hs->{rs_pub} = write_public_key_raw_to_pem( $CURVE, $hs->{rs}{pub}, $hs->{who} . "_rs_pub.pem" );
       }
-      $i += $expected;
+
+      $i++;
     } elsif ( $m eq 'ee' ) {
       mix_key( $hs->{ss}, noise_ecdh( $hs->{e_priv}, $hs->{re_pub} ) );
     } elsif ( $m eq 'es' ) {
@@ -457,7 +502,7 @@ sub read_message {
     }
   } ## end for my $m ( @{ $hs->{message_pattens...}})
 
-  my $temp_m = substr $message, $i;
+  my $temp_m = $message->[$i];
   $out = decrypt_and_hash( $out, $hs->{ss}, $temp_m );
 
   $hs->{should_write} = 1;
@@ -470,197 +515,252 @@ sub read_message {
   return ( $out );
 } ## end sub read_message
 
-test_nn();
-test_nk();
-test_kk();
-test_ik();
+sub check_pub_avail {
+  my ( $type, $value ) = @_;
+  ### check pub avail: $type, unpack("H*", $value)
 
-sub test_ik {
-  print "test ik\n";
-  my $a_hs = new_handshake_state(
-    { who                    => 'a',
-      handshake_pattern_name => 'IK',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 1,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
+  if ( $type eq 'raw' ) {
 
-      s_priv => 'a_s_priv.pem',
-      s_pub  => 'a_s_pub.pem',
-      rs_pub => 'b_s_pub.pem',
+    #check the value is in the TOFU (trust on first use) record or not
+    return $value;                     #pub raw
+  }
 
-    } );
+  if ( $type eq 'id' ) {
 
-  my $b_hs = new_handshake_state(
-    { who                    => 'b',
-      handshake_pattern_name => 'IK',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 0,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
+    #check the value is in the TOFU (trust on first use) record or not
+    #map value to the pub raw
+  }
 
-      s_priv => 'b_s_priv.pem',
-      s_pub  => 'b_s_pub.pem',
+  if ( $type eq 'sn' ) {
 
-    } );
+    #check the value is in the TOFU (trust on first use) record or not
+    #map value to the cert, extract the pub raw from cert
+  }
 
-  test_noise( $a_hs, $b_hs );
-} ## end sub test_ik
+  if ( $type eq 'cert' ) {
 
-sub test_kk {
-  print "test kk\n";
-  my $a_hs = new_handshake_state(
-    { who                    => 'a',
-      handshake_pattern_name => 'KK',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 1,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
+    #check the value is in the TOFU (trust on first use) record or not
+    #if not, check_cert_avail
+    #extract the pub raw from cert
+  }
+} ## end sub check_pub_avail
 
-      s_priv => 'a_s_priv.pem',
-      s_pub  => 'a_s_pub.pem',
-      rs_pub => 'b_s_pub.pem',
+noise_test_main();
 
-    } );
+sub noise_test_main {
 
-  my $b_hs = new_handshake_state(
-    { who                    => 'b',
-      handshake_pattern_name => 'KK',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 0,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
+  my @test_sub = (
+    \&noise_test_one,
+    \&noise_test_two,
+    \&noise_test_three,
+  );
 
-      s_priv => 'b_s_priv.pem',
-      s_pub  => 'b_s_pub.pem',
-      rs_pub => 'a_s_pub.pem',
+  my @test_psk = ( [ undef, undef ], [ 'test_psk', 0 ], [ 'test_psk', 1 ] );
 
-    } );
+  # N K X NN NK KK IK IX
+  for my $pattern ( qw/N K X NN NK KK IK IX XX/ ) {
+    for my $psk_r ( @test_psk ) {
+      my ( $psk, $psk_id ) = @$psk_r;
+      ### -----------start test --------: $pattern, $psk, $psk_id
+      my $a_hs = new_handshake_state(
+        { who                    => 'a',
+          handshake_pattern_name => $pattern,
+          ciphersuite_name       => join( "_", $CURVE, $CIPHER_FUNC, $HASH_FUNC ),
+          initiator              => 1,
+          prologue               => 'some_info',
+          psk                    => $psk,
+          psk_id                 => $psk_id,
 
-  test_noise( $a_hs, $b_hs );
-} ## end sub test_kk
+          s_priv => 'a_s_priv.pem',
+          s_pub  => 'a_s_pub.pem',
+          rs_pub => 'b_s_pub.pem',
 
-sub test_nk {
-  print "test nk\n";
-  my $a_hs = new_handshake_state(
-    { who                    => 'a',
-      handshake_pattern_name => 'NK',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 1,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
+          s_pub_info_type  => 'raw',
+          s_pub_info_value => read_public_key_pem_to_raw( 'a_s_pub.pem' ),
+        } );
 
-      rs_pub => 'b_s_pub.pem',
+      my $b_hs = new_handshake_state(
+        { who                    => 'b',
+          handshake_pattern_name => $pattern,
+          ciphersuite_name       => join( "_", $CURVE, $CIPHER_FUNC, $HASH_FUNC ),
+          initiator              => 0,
+          prologue               => 'some_info',
+          psk                    => $psk,
+          psk_id                 => $psk_id,
 
-    } );
+          s_priv => 'b_s_priv.pem',
+          s_pub  => 'b_s_pub.pem',
+          rs_pub => 'a_s_pub.pem',
 
-  my $b_hs = new_handshake_state(
-    { who                    => 'b',
-      handshake_pattern_name => 'NK',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 0,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
+          s_pub_info_type  => 'raw',
+          s_pub_info_value => read_public_key_pem_to_raw( 'b_s_pub.pem' ),
+        } );
 
-      s_priv => 'b_s_priv.pem',
-      s_pub  => 'b_s_pub.pem',
+      my $len = @{ $HANDSHAKE_PATTEN{$pattern}{messages} };
+      $test_sub[ $len - 1 ]->( $a_hs, $b_hs );
 
-    } );
+      ### -----------end test --------: $pattern, $psk, $psk_id
+    } ## end for my $psk_r ( @test_psk)
+  } ## end for my $pattern ( qw/XX/)
+} ## end sub noise_test_main
 
-  test_noise( $a_hs, $b_hs );
-} ## end sub test_nk
-
-sub test_nn {
-  print "test nn\n";
-  my $a_hs = new_handshake_state(
-    { who                    => 'a',
-      handshake_pattern_name => 'NN',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 1,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
-    } );
-
-  my $b_hs = new_handshake_state(
-    { who                    => 'b',
-      handshake_pattern_name => 'NN',
-      ciphersuite_name       => 'secp256r1_AESGCM_SHA256',
-      initiator              => 0,
-      prologue               => 'some_info',
-      psk                    => undef,
-      psk_id                 => undef,
-    } );
-
-  test_noise( $a_hs, $b_hs );
-} ## end sub test_nn
-
-sub test_noise {
+sub noise_test_one {
   my ( $a_hs, $b_hs ) = @_;
 
-  # -> e
-  # a
-  print "\ninit a_hs:\n";
-  dump( $a_hs );
-  print "a send msg to b:\n";
-  my $a_msg_src = strftime("%Y%m%d%H%M%S.init", localtime);
-  my ( $a_msg ) = write_message( '', $a_hs, $a_msg_src );
-  dump( 'a_msg', $a_msg );
-  print "a_msg:\n", unpack( "H*", $a_msg ), "\n";
+  # a write message to b
+  ### init a_hs
   dump( 'a_hs', $a_hs );
-  print "\n-----------\n\n";
+  ### a send msg to b
+  my $a_msg_src = "init.syn";
+  ### $a_msg_src
+  my ( $a_msg, $a_c1, $a_c2 ) = write_message( [], $a_hs, $a_msg_src );
+  ### a_msg: unpack( "H*", $a_msg )
+  dump( 'a_hs', $a_hs, $a_c1, $a_c2 );
 
-  # b
-  print "\ninit b_hs:\n";
-  dump( $b_hs );
-  print "b recv msg from a:\n";
-  my ( $b_recv_a_msg ) = read_message( '', $b_hs, $a_msg );
-  dump( 'b_recv_a_msg', $b_recv_a_msg );
-  print "b_recv_a_msg:\n", unpack( "H*", $b_recv_a_msg ), "\n";
+  # b read message from a
+  ### init b_hs
   dump( 'b_hs', $b_hs );
-  print "\n-----------\n\n";
-
-  # <- e, ee
-  # b
-  print "\nb send msg to a:\n";
-  my $b_msg_src = strftime("%Y%m%d%H%M%S.resp", localtime);
-  my ( $b_msg, $b_c1, $b_c2 ) = write_message( '', $b_hs, $b_msg_src );
-  dump( 'b_msg', $b_msg );
-  print "b_msg:\n", unpack( "H*", $b_msg ), "\n";
-  dump( $b_hs, $b_c1, $b_c2 );
-  print "\n-----------\n\n";
-
-  # a
-  print "\na recv msg from b:\n";
-  my ( $a_recv_b_msg, $a_c1, $a_c2 ) = read_message( '', $a_hs, $b_msg );
-  dump( 'a_recv_b_msg', $a_recv_b_msg );
-  print "a_recv_b_msg:\n", unpack( "H*", $a_recv_b_msg ), "\n";
-  dump( $a_hs, $a_c1, $a_c2 );
-  print "\n-----------\n\n";
+  ### b recv msg from a
+  my ( $b_recv_a_msg_r, $b_c1, $b_c2 ) = read_message( [], $b_hs, $a_msg );
+  ### b_recv_a_msg: $b_recv_a_msg_r->[0]
+  dump( 'b_hs', $b_hs, $b_c1, $b_c2 );
 
   # a -> b : plain_a.txt  -> trans_cipherinfo_a
-  print "\na send comm msg to b:\n";
-  my ( $a_c1_key, $a_c1_iv ) = noise_derive_key_iv( $a_c1->{k}, $a_msg_src . $a_recv_b_msg );
+  ### a send comm msg to b
+  my ( $a_c1_key, $a_c1_iv ) = noise_derive_key_iv( $a_c1->{k}, '' );
   my $a_trans_cipherinfo_b = aead_encrypt( $a_c1_key, $a_c1_iv, $a_hs->{ss}{h}, slurp( 'plain_a.txt' ) );
-  print "\nb recv comm msg from a:\n";
-  my ( $b_c1_key, $b_c1_iv ) = noise_derive_key_iv( $b_c1->{k}, $b_recv_a_msg . $b_msg_src );
-  my $b_recv_plaintext_a = aead_decrypt( $b_c1_key, $b_c1_iv, $b_hs->{ss}{h}, $a_trans_cipherinfo_b );
-  print $b_recv_plaintext_a, "\n";
-  print "\n-----------\n\n";
 
-  # b -> a : plain_b.txt  -> trans_cipherinfo_b
-  print "\nb send comm msg to a:\n";
-  my ( $b_c2_key, $b_c2_iv ) = noise_derive_key_iv( $b_c2->{k}, $b_recv_a_msg . $b_msg_src );
+  ### b recv comm msg from a
+  my ( $b_c1_key, $b_c1_iv ) = noise_derive_key_iv( $b_c1->{k}, '' );
+  my $b_recv_plaintext_a = aead_decrypt( $b_c1_key, $b_c1_iv, $b_hs->{ss}{h}, $a_trans_cipherinfo_b );
+  ### $b_recv_plaintext_a
+
+  # b -> a : plain_b.txt -> trans_cipherinfo_b
+  ### b send comm msg to a
+  my ( $b_c2_key, $b_c2_iv ) = noise_derive_key_iv( $b_c2->{k}, '' );
   my $b_trans_cipherinfo_a = aead_encrypt( $b_c2_key, $b_c2_iv, $b_hs->{ss}{h}, slurp( 'plain_b.txt' ) );
-  print "\na recv comm msg from b:\n";
-  my ( $a_c2_key, $a_c2_iv ) = noise_derive_key_iv( $a_c2->{k}, $a_msg_src . $a_recv_b_msg );
+
+  ### a recv comm msg from b
+  my ( $a_c2_key, $a_c2_iv ) = noise_derive_key_iv( $a_c2->{k}, '' );
   my $a_recv_plaintext_b = aead_decrypt( $a_c2_key, $a_c2_iv, $a_hs->{ss}{h}, $b_trans_cipherinfo_a );
-  print $a_recv_plaintext_b, "\n";
-  print "\n-----------\n\n";
-} ## end sub test_noise
+  ### $a_recv_plaintext_b
+
+} ## end sub noise_test_one
+
+sub noise_test_two {
+  my ( $a_hs, $b_hs ) = @_;
+
+  ### a write message to b
+  ### init a_hs
+  dump( $a_hs );
+  ### a send msg to b
+  my $a_msg_src = "init.syn";
+  my ( $a_msg ) = write_message( [], $a_hs, $a_msg_src );
+  dump( 'a_msg', $a_msg );
+  dump( 'a_hs',  $a_hs );
+
+  ### b read message from a
+  ### init b_hs
+  dump( $b_hs );
+  ### b recv msg from a
+  my ( $b_recv_a_msg_r ) = read_message( [], $b_hs, $a_msg );
+  dump( 'b_recv_a_msg', $b_recv_a_msg_r->[0] );
+  dump( 'b_hs',         $b_hs );
+
+  ### b write_message to a
+  ### b send msg to a
+  my $b_msg_src = "resp.ack";
+  my ( $b_msg, $b_c1, $b_c2 ) = write_message( [], $b_hs, $b_msg_src );
+  ### b_msg: unpack("H*", $b_msg)
+  dump( $b_hs, $b_c1, $b_c2 );
+
+  ### a read_message from b
+  ### a recv msg from b
+  my ( $a_recv_b_msg_r, $a_c1, $a_c2 ) = read_message( [], $a_hs, $b_msg );
+  dump( 'a_recv_b_msg', $a_recv_b_msg_r->[0] );
+  dump( $a_hs, $a_c1, $a_c2 );
+
+  # a -> b : plain_a.txt  -> trans_cipherinfo_a
+  ### a send comm msg to b
+  my ( $a_c1_key, $a_c1_iv ) = noise_derive_key_iv( $a_c1->{k}, '' );
+  my $a_trans_cipherinfo_b = aead_encrypt( $a_c1_key, $a_c1_iv, $a_hs->{ss}{h}, slurp( 'plain_a.txt' ) );
+  ### b recv comm msg from a
+  my ( $b_c1_key, $b_c1_iv ) = noise_derive_key_iv( $b_c1->{k}, '' );
+  my $b_recv_plaintext_a = aead_decrypt( $b_c1_key, $b_c1_iv, $b_hs->{ss}{h}, $a_trans_cipherinfo_b );
+  ### $b_recv_plaintext_a
+
+  ### b to a , plain_b.txt to trans_cipherinfo_b
+  ### b send comm msg to a
+  my ( $b_c2_key, $b_c2_iv ) = noise_derive_key_iv( $b_c2->{k}, '' );
+  my $b_trans_cipherinfo_a = aead_encrypt( $b_c2_key, $b_c2_iv, $b_hs->{ss}{h}, slurp( 'plain_b.txt' ) );
+  ### a recv comm msg from b
+  my ( $a_c2_key, $a_c2_iv ) = noise_derive_key_iv( $a_c2->{k}, '' );
+  my $a_recv_plaintext_b = aead_decrypt( $a_c2_key, $a_c2_iv, $a_hs->{ss}{h}, $b_trans_cipherinfo_a );
+  ### $a_recv_plaintext_b
+} ## end sub noise_test_two
+
+sub noise_test_three {
+  my ( $a_hs, $b_hs ) = @_;
+
+  ### a write message to b
+  ### init a_hs
+  dump( $a_hs );
+  ### a send msg to b
+  my $a_msg_src = "init.syn";
+  my ( $a_msg ) = write_message( [], $a_hs, $a_msg_src );
+  dump( 'a_msg', $a_msg );
+  dump( 'a_hs',  $a_hs );
+
+  ### b read message from a
+  ### init b_hs
+  dump( $b_hs );
+  ### b recv msg from a
+  my ( $b_recv_a_msg_r ) = read_message( [], $b_hs, $a_msg );
+  dump( 'b_recv_a_msg', $b_recv_a_msg_r->[0] );
+  dump( 'b_hs',         $b_hs );
+
+  ### b write_message to a
+  ### b send msg to a
+  my $b_msg_src = "resp.ack";
+  my ( $b_msg ) = write_message( [], $b_hs, $b_msg_src );
+  ### b_msg: unpack("H*", $b_msg)
+  dump( $b_hs );
+
+  ### a read_message from b
+  ### a recv msg from b
+  my ( $a_recv_b_msg_r ) = read_message( [], $a_hs, $b_msg );
+  dump( 'a_recv_b_msg', $a_recv_b_msg_r->[0] );
+  dump( $a_hs );
+
+  # a write message to b
+  ### a send msg to b
+  my $a_msg2_src = "init.ack";
+  ### $a_msg2_src
+  my ( $a_msg2, $a_c1, $a_c2 ) = write_message( [], $a_hs, $a_msg2_src );
+  ### a_msg2: unpack( "H*", $a_msg2 )
+  dump( 'a_hs', $a_hs, $a_c1, $a_c2 );
+
+  # b read message from a
+  ### b recv msg from a
+  my ( $b_recv_a_msg2_r, $b_c1, $b_c2 ) = read_message( [], $b_hs, $a_msg2 );
+  ### b_recv_a_msg2: $b_recv_a_msg2_r->[0]
+  dump( 'b_hs', $b_hs, $b_c1, $b_c2 );
+
+  # a -> b : plain_a.txt  -> trans_cipherinfo_a
+  ### a send comm msg to b
+  my ( $a_c1_key, $a_c1_iv ) = noise_derive_key_iv( $a_c1->{k}, '' );
+  my $a_trans_cipherinfo_b = aead_encrypt( $a_c1_key, $a_c1_iv, $a_hs->{ss}{h}, slurp( 'plain_a.txt' ) );
+  ### b recv comm msg from a
+  my ( $b_c1_key, $b_c1_iv ) = noise_derive_key_iv( $b_c1->{k}, '' );
+  my $b_recv_plaintext_a = aead_decrypt( $b_c1_key, $b_c1_iv, $b_hs->{ss}{h}, $a_trans_cipherinfo_b );
+  ### $b_recv_plaintext_a
+
+  ### b to a , plain_b.txt to trans_cipherinfo_b
+  ### b send comm msg to a
+  my ( $b_c2_key, $b_c2_iv ) = noise_derive_key_iv( $b_c2->{k}, '' );
+  my $b_trans_cipherinfo_a = aead_encrypt( $b_c2_key, $b_c2_iv, $b_hs->{ss}{h}, slurp( 'plain_b.txt' ) );
+  ### a recv comm msg from b
+  my ( $a_c2_key, $a_c2_iv ) = noise_derive_key_iv( $a_c2->{k}, '' );
+  my $a_recv_plaintext_b = aead_decrypt( $a_c2_key, $a_c2_iv, $a_hs->{ss}{h}, $b_trans_cipherinfo_a );
+  ### $a_recv_plaintext_b
+} ## end sub noise_test_three
