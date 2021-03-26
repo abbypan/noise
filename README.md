@@ -11,4 +11,4 @@ remove symmetric state: prevCK, prevH
 
 add hkdf for aead, derive key, iv
 
-add time() for aead aad
+add time() for aead iv xor

@@ -158,6 +158,7 @@ sub noise_derive_key_iv {
   #$derived_key3 = hkdf($keying_material, $salt, $hash_name, $len, $info);
   my $key = hkdf( $k, $salt, $HASH_FUNC, $KEY_LEN, "Noise Key" );
   my $iv  = hkdf( $k, $salt, $HASH_FUNC, $IV_LEN,  "Noise IV" );
+
   return ( $key, $iv );
 }
 
@@ -165,7 +166,10 @@ sub aead_encrypt {
   my ( $key, $iv, $aad, $plaintext ) = @_;
 
   my $time = time();
-  my ( $ciphertext, $authtag ) = gcm_encrypt_authenticate( 'AES', $key, $iv, $time . $aad, $plaintext );
+  #my ( $ciphertext, $authtag ) = gcm_encrypt_authenticate( 'AES', $key, $iv, $time . $aad, $plaintext );
+  
+  my $iv_xor = pack("B*", unpack("B*", $iv) ^ unpack("B*", $time));
+  my ( $ciphertext, $authtag ) = gcm_encrypt_authenticate( 'AES', $key, $iv_xor, $aad, $plaintext );
 
   my $cipherinfo = encode_cbor [ $time, $authtag, $ciphertext ];
 
@@ -173,6 +177,7 @@ sub aead_encrypt {
   ### key: unpack("H*", $key)
   ### iv: unpack("H*", $iv)
   ### time: unpack("H*", $time)
+  ### iv_xor: unpack("H*", $iv_xor)
   ### aad: unpack("H*", $aad)
   ### plaintext: unpack("H*", $plaintext)
   ### ciphertext: unpack("H*", $ciphertext)
@@ -188,7 +193,9 @@ sub aead_decrypt {
   my $d = decode_cbor $cipherinfo;
   my ( $time, $authtag, $ciphertext ) = @$d;
 
-  my $plaintext = gcm_decrypt_verify( 'AES', $key, $iv, $time . $aad, $ciphertext, $authtag );
+  my $iv_xor = pack("B*", unpack("B*", $iv) ^ unpack("B*", $time));
+
+  my $plaintext = gcm_decrypt_verify( 'AES', $key, $iv_xor, $aad, $ciphertext, $authtag );
 
   ### noise decrypt
   ### key: unpack("H*", $key)
@@ -196,6 +203,7 @@ sub aead_decrypt {
   ### aad: unpack("H*", $aad)
   ### cipherinfo: unpack("H*", $cipherinfo)
   ### time: unpack("H*", $time)
+  ### iv_xor: unpack("H*", $iv_xor)
   ### authtag: unpack("H*", $authtag)
   ### ciphertext: unpack("H*", $ciphertext)
   ### plaintext: unpack("H*", $plaintext)
